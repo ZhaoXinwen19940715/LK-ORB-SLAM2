@@ -1,0 +1,197 @@
+bool Tracking::TrackWithLK()
+{
+    cout<<"LK Tracking"<<endl;
+    vector<cv::KeyPoint>lastfeature;
+    cv::Mat lastdesp;
+    vector<cv::Point2f>lastkeypoint;
+    vector<MapPoint*>lastmappoint;
+    vector<cv::Point2f>next_keypoints,curr;
+    vector<unsigned char> status;
+    vector<float> error; 
+
+    for ( int i = 0; i < mLastFrame.N; i++)
+    {
+	 if (mLastFrame.mvpMapPoints[i])      
+         {   
+	   lastkeypoint.push_back(mLastFrame.mvKeysUn[i].pt);
+	   lastfeature.push_back(mLastFrame.mvKeysUn[i]);
+           lastmappoint.push_back(mLastFrame.mvpMapPoints[i]);	
+           lastdesp.push_back(mLastFrame.mDescriptors.row(i));	   
+	 }	 
+    }
+
+    cout<<"Feature point before tracking"<<lastkeypoint.size()<<endl;
+    cout<<"Map point before tracking"<<mLastFrame.mvpMapPointsu.size()<<endl;
+    cv::calcOpticalFlowPyrLK( mLastFrame.mImGray, mCurrentFrame.mImGray, lastkeypoint, next_keypoints, status, error );
+    cout<<"LK Tracking success"<<endl;
+    for(int i = 0;i<lastkeypoint.size();i++)
+    {
+     if(status[i]==1)
+     {
+           curr.push_back(next_keypoints[i]);
+           //mCurrentFrame.mvKeys.push_back(lastfeature[i]);
+	   //mCurrentFrame.mvKeysUn.push_back(lastfeature[i]);
+	   mCurrentFrame.mvbOutlier.push_back(true);
+	   mCurrentFrame.mvpMapPointsu.push_back(mLastFrame.mvpMapPointsu[i]);
+	   mCurrentFrame.mvpMapPoints.push_back(lastmappoint[i]);
+	   mCurrentFrame.mDescriptors.push_back(lastdesp.row(i));
+     }
+    }
+    for(int i = 0;i<curr.size();i++)
+    {
+	mCurrentFrame.mvKeys.push_back(cv::KeyPoint(curr[i], 1.f));
+	mCurrentFrame.mvKeysUn.push_back(cv::KeyPoint(curr[i], 1.f));
+    }
+    mCurrentFrame.N = mCurrentFrame.mvKeysUn.size();
+
+    cout<<"number of feature point： "<<mCurrentFrame.N<<endl;
+    cout<<"number of map point： "<<mCurrentFrame.mvpMapPoints.size()<<endl;
+
+    vector<cv::Point3f> pts3d;
+    vector<cv::Point2f> pts2d;  
+          for ( cv::Point2f i:curr )
+          {
+              pts2d.push_back ( i );
+          }
+          cout<<"pts2d"<<pts2d.size()<<endl;
+          for(int i =0;i<mCurrentFrame.mvKeysUn.size();i++)
+	  {
+	    pts3d.push_back(mCurrentFrame.mvpMapPointsu[i]);
+	  }
+	  cout<<"pts3d"<<pts3d.size()<<endl;
+          cv::Mat K = mK;
+          cv::Mat rvec, tvec, inliers;
+          cv::solvePnPRansac ( pts3d, pts2d, K, cv::Mat(), rvec, tvec, false, 100, 4.0, 0.99, inliers );
+         SE3 T_c_w_estimated_ = SE3 (
+                           SO3 ( rvec.at<double> ( 0,0 ), rvec.at<double> ( 1,0 ), rvec.at<double> ( 2,0 ) ),
+                           Eigen::Vector3d ( tvec.at<double> ( 0,0 ), tvec.at<double> ( 1,0 ), tvec.at<double> ( 2,0 ) )
+                       );
+         
+         g2o::SE3Quat SE3quat_recov=g2o::SE3Quat (T_c_w_estimated_.rotation_matrix(), T_c_w_estimated_.translation());
+	 cv::Mat pose = Converter::toCvMat(SE3quat_recov);
+         mCurrentFrame.SetPose(pose);
+
+	 for(int i = 0; i<mCurrentFrame.N;i++)
+	 {
+	   float uL = mCurrentFrame.mvKeysUn[i].pt.x;
+	   Eigen::Vector3d P_world = Eigen::Vector3d(mCurrentFrame.mvpMapPointsu[i].x,mCurrentFrame.mvpMapPointsu[i].y,mCurrentFrame.mvpMapPointsu[i].z);
+	   Eigen::Vector3d P_camera = T_c_w_estimated_*P_world;
+	   mCurrentFrame.mvDepth.push_back(P_camera(2,0));
+	   mCurrentFrame.mvuRight.push_back(uL-mbf/P_camera(2,0));
+	 }
+	 for(int i =0; i<inliers.rows;i++)
+	 {
+            int d = inliers.at<int>(i);
+	    mCurrentFrame.mvbOutlier[d]=false;    
+	 }
+	     int nmatches = mCurrentFrame.N;
+	     int nmatchesMap = 0;	     
+     for(int i =0; i<mCurrentFrame.N; i++)
+    {
+        if(mCurrentFrame.mvpMapPoints[i])
+        {
+
+	   if(mCurrentFrame.mvbOutlier[i])
+            {
+                MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+
+                mCurrentFrame.mvpMapPoints[i]=static_cast<MapPoint*>(NULL);
+                mCurrentFrame.mvbOutlier[i]=false;
+                pMP->mbTrackInView = false;
+                pMP->mnLastFrameSeen = mCurrentFrame.mnId;
+                nmatches--;
+            }
+            else if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
+                nmatchesMap++;
+        }
+    }    
+    cout<<"number of good matches： "<<nmatchesMap<<endl;
+    return nmatchesMap>=10;
+}
+
+
+
+bool Tracking::TrackWithMotionModel()
+{
+    mCurrentFrame.DetectORB(mImGray,mImGrayRight);
+    ORBmatcher matcher(0.9,true);
+
+    // Update last frame pose according to its reference keyframe
+    // Create "visual odometry" points if in Localization Mode
+    UpdateLastFrame();
+
+    mCurrentFrame.SetPose(mVelocity*mLastFrame.mTcw);
+
+    fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+
+    // Project points seen in previous frame
+    int th;
+
+        th=7;
+    int nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,th,false);
+
+    // If few matches, uses a wider window search
+    if(nmatches<20)
+    {
+        fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+        nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,2*th,false);
+    }
+
+   // if(nmatches<20)
+       // return false;
+
+    // Optimize frame pose with all matches
+    Optimizer::PoseOptimization(&mCurrentFrame);
+
+    // Discard outliers
+    int nmatchesMap = 0;
+    for(int i =0; i<mCurrentFrame.N; i++)
+    {
+        if(mCurrentFrame.mvpMapPoints[i])
+        {
+            if(mCurrentFrame.mvbOutlier[i])
+            {
+                MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+
+                mCurrentFrame.mvpMapPoints[i]=static_cast<MapPoint*>(NULL);
+                mCurrentFrame.mvbOutlier[i]=false;
+                pMP->mbTrackInView = false;
+                pMP->mnLastFrameSeen = mCurrentFrame.mnId;
+                nmatches--;
+            }
+            else if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
+                nmatchesMap++;
+        }
+    }    
+
+    return true;
+}
+
+
+void Frame::DetectORB(const cv::Mat &imLeft, const cv::Mat &imRight)
+{
+    thread threadLeft(&Frame::ExtractORB,this,0,imLeft);
+    thread threadRight(&Frame::ExtractORB,this,1,imRight);
+    threadLeft.join();
+    threadRight.join();
+    N = mvKeys.size();
+
+    if(mvKeys.empty())
+        return;
+    ComputeStereoMatches();
+    N_STEREO = 0;
+    for(int i = 0; i<N;i++)
+    {
+      if(mvDepth[i]>0)
+      {
+	N_STEREO++;
+      }
+    }
+
+    UndistortKeyPoints();
+    mvpMapPoints = vector<MapPoint*>(N,static_cast<MapPoint*>(NULL));
+    mvbOutlier = vector<bool>(N,false);
+    mb = mbf/fx;
+    
+    AssignFeaturesToGrid();    
+}
