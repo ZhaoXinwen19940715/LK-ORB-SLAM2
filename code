@@ -1,4 +1,4 @@
-bool Tracking::TrackWithLK()
+bool Tracking::TrackingWithLK()
 {
     cout<<"LK Tracking"<<endl;
     vector<cv::KeyPoint>lastfeature;
@@ -111,7 +111,7 @@ bool Tracking::TrackWithLK()
 
 
 
-bool Tracking::TrackWithMotionModel()
+bool Tracking::TrackingWithMotionModel()
 {
     mCurrentFrame.DetectORB(mImGray,mImGrayRight);
     ORBmatcher matcher(0.9,true);
